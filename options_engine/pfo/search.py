@@ -79,12 +79,12 @@ def grid() -> List[Rule]:
     # Selling: bullish signals sell puts, bearish signals sell calls.
     for right, signals in (("put", BULLISH), ("call", BEARISH)):
         for sig, dte, delta, tp, sl, hold in itertools.product(
-            signals, (7, 14, 30, 45), (0.03, 0.05, 0.10, 0.16),
+            signals, (7, 14, 30, 45), (0.03, 0.05, 0.10, 0.16, 0.25, 0.30),
             (0.50, 0.80, 1.00), (None, 1.0, 2.0, 3.0), (5, 20, 999),
         ):
             rules.append(Rule("sell", right, sig, dte, delta, tp, sl, hold))
         for sig, dte, delta, width, tp, sl in itertools.product(
-            signals, (7, 14, 30, 45), (0.03, 0.05, 0.10, 0.16, 0.25), (1.0, 2.0, 3.0, 5.0),
+            signals, (7, 14, 30, 45), (0.03, 0.05, 0.10, 0.16, 0.25, 0.30, 0.40), (1.0, 2.0, 3.0, 5.0, 10.0, 20.0),
             (0.50, 0.80, 1.00), (None, 1.0, 2.0, 3.0),
         ):
             rules.append(Rule("spread", right, sig, dte, delta, tp, sl, 999, width))
@@ -151,7 +151,7 @@ class TradeRec:
     cost: float  # dollars: premium paid (buy), or credit received (sell/spread)
     pnl: float  # dollars per contract after fees
     reason: str
-    capital: float  # dollars an account must set aside for one contract (inf = uncovered)
+    capital: float  # dollars an account must set aside for one contract (Reg T margin if uncovered)
 
 
 def _legs(rule: Rule, K: float) -> Tuple[Tuple[float, int], ...]:
@@ -234,12 +234,21 @@ def simulate(rule: Rule, lo: int, hi: int, max_trades: Optional[int] = None) -> 
         elif rule.action == "spread":
             capital = (rule.width - basis) * 100 + fee * n_legs * 2
         else:
-            capital = math.inf
+            capital = reg_t_margin(close[i] * f, K, is_call, basis) * 100 + fee * 2
         out.append(TradeRec(mf.dates[i], mf.dates[j], basis * 100, (exit_px - cost) * 100 - fees, reason, capital))
         if max_trades and len(out) >= max_trades:
             break
         i = j
     return out
+
+
+def reg_t_margin(S: float, K: float, is_call: bool, premium: float) -> float:
+    """Initial margin per share to sell one uncovered equity/ETF option (Cboe / Reg T rule):
+    the premium plus 20% of the underlying less the out-of-the-money amount, with a floor of
+    the premium plus 10% of the strike (puts) or of the underlying (calls)."""
+    otm = max(K - S, 0.0) if is_call else max(S - K, 0.0)
+    floor = 0.10 * (S if is_call else K)
+    return premium + max(0.20 * S - otm, floor)
 
 
 def _tradeable_entry(i: int, rule: Rule) -> bool:
@@ -299,11 +308,14 @@ def account_paths(rule: Rule, lo: int, hi: int, equity: float, years: int, step:
     }
 
 
-def summarize(trades: Sequence[TradeRec]) -> Dict[str, float]:
+def summarize(trades: Sequence[TradeRec], years: Optional[float] = None) -> Dict[str, float]:
+    """Trade statistics. With `years`, also the growth of an account that puts all its capital
+    into every trade (as many contracts as the capital covers) and compounds."""
     n = len(trades)
     if not n:
         return {"n": 0, "win_rate": 0.0, "total": 0.0, "avg": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
-                "worst": 0.0, "pf": 0.0, "max_dd": 0.0, "avg_cost": 0.0, "max_capital": 0.0}
+                "worst": 0.0, "pf": 0.0, "max_dd": 0.0, "avg_cost": 0.0, "max_capital": 0.0,
+                "cagr": 0.0, "growth_dd": 0.0, "worst_roc": 0.0, "ruined": False}
     wins = [t.pnl for t in trades if t.pnl > 0]
     losses = [t.pnl for t in trades if t.pnl <= 0]
     eq = peak = dd = 0.0
@@ -324,15 +336,76 @@ def summarize(trades: Sequence[TradeRec]) -> Dict[str, float]:
         "max_dd": dd,
         "avg_cost": sum(t.cost for t in trades) / n,
         "max_capital": max(t.capital for t in trades),
+        **_growth(trades, years),
     }
+
+
+def _growth(trades: Sequence[TradeRec], years: Optional[float]) -> Dict[str, float]:
+    if not years:
+        return {"cagr": 0.0, "growth_dd": 0.0, "worst_roc": 0.0, "ruined": False}
+    eq = peak = 1.0
+    dd = 0.0
+    worst = 0.0
+    for t in trades:
+        roc = t.pnl / t.capital if t.capital > 0 else 0.0
+        worst = min(worst, roc)
+        eq *= 1 + roc
+        if eq <= 1e-9:
+            return {"cagr": -1.0, "growth_dd": 1.0, "worst_roc": worst, "ruined": True}
+        peak = max(peak, eq)
+        dd = max(dd, 1 - eq / peak)
+    return {"cagr": eq ** (1 / years) - 1, "growth_dd": dd, "worst_roc": worst, "ruined": False}
+
+
+def _years(a: date, b: date) -> float:
+    return max((b - a).days, 1) / 365.25
 
 
 def _eval(args) -> Tuple[Rule, Dict[str, float], Dict[str, float], Dict[str, float]]:
     rule, (lo, mid, hi) = args
     full = simulate(rule, lo, hi)
-    cut = _S["mf"].dates[mid]
-    return (rule, summarize(full), summarize([t for t in full if t.entry < cut]),
-            summarize([t for t in full if t.entry >= cut]))
+    d = _S["mf"].dates
+    cut = d[mid]
+    return (rule, summarize(full, _years(d[lo], d[hi])),
+            summarize([t for t in full if t.entry < cut], _years(d[lo], cut)),
+            summarize([t for t in full if t.entry >= cut], _years(cut, d[hi])))
+
+
+def _every_day_job(rule: Rule) -> Dict[str, float]:
+    return summarize(every_entry_day(rule, _S["lo"], len(_S["mf"]) - 1))
+
+
+def every_entry_day_many(rules: List[Rule], data_dir: str, start: Optional[date] = None,
+                         pricing: PricingConfig = PricingConfig(), costs: CostConfig = CostConfig(),
+                         processes: Optional[int] = None) -> List[Dict[str, float]]:
+    """every_entry_day summaries for many rules, in parallel."""
+    init_args = (data_dir, pricing, costs, None, start)
+    procs = processes or os.cpu_count() or 1
+    if procs <= 1 or len(rules) < 8:
+        _init(*init_args)
+        return [_every_day_job(r) for r in rules]
+    with Pool(procs, initializer=_init, initargs=init_args) as pool:
+        return pool.map(_every_day_job, rules, chunksize=4)
+
+
+def cached_search(data_dir: str, start: Optional[date], cache_dir: str, log=print):
+    """run_search, reusing the last result if the data, rules and pricing haven't changed."""
+    import hashlib
+    import pickle
+
+    spy = os.path.join(data_dir, "SPY.csv")
+    stamp = hashlib.sha1(repr((os.path.getmtime(spy), start, grid(), PricingConfig(), CostConfig())).encode()).hexdigest()
+    path = os.path.join(cache_dir, f"search_cache_{stamp[:12]}.pkl")
+    if os.path.exists(path):
+        log("Using cached search results.")
+        with open(path, "rb") as fh:
+            return pickle.load(fh)
+    log(f"Testing {len(grid()):,} rules (10-30 minutes on a typical laptop)...")
+    out = run_search(data_dir, start=start)
+    os.makedirs(cache_dir, exist_ok=True)
+    with open(path, "wb") as fh:
+        pickle.dump(out, fh)
+    return out
 
 
 def run_search(data_dir: str, split: Optional[date] = None, processes: Optional[int] = None,

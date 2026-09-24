@@ -4,7 +4,8 @@
     python -m pfo backtest              run the full study, write an HTML report
     python -m pfo backtest --sample     same, on the bundled 2014-2018 sample (offline)
     python -m pfo today --equity 2000   today's regime and exact trade, for paper trading
-    python -m pfo search                win-rate search over single SPY calls and puts
+    python -m pfo search                win-rate search over SPY calls, puts and spreads
+    python -m pfo income                capital needed for a monthly income target, sized for safety
 """
 
 from __future__ import annotations
@@ -48,9 +49,14 @@ def main(argv=None) -> int:
     sr = sub.add_parser("search", help="win-rate search over single-leg SPY calls and puts")
     sr.add_argument("--sample", action="store_true", help="use the bundled offline sample data")
     sr.add_argument("--start", type=_date, default=date(2005, 1, 1))
-    sr.add_argument("--account", type=float, default=500.0, help="account size the trades must fit")
+    sr.add_argument("--account", type=float, default=500.0,
+                    help="account size the trades must fit; 0 = no limit (win rate vs growth report)")
     sr.add_argument("--split", type=_date, help="first out-of-sample date (default: 60%% through)")
     sr.add_argument("--no-open", action="store_true")
+
+    inc = sub.add_parser("income", help="capital needed for $1k-$2k a month, sized for safety")
+    inc.add_argument("--start", type=_date, default=date(2005, 1, 1))
+    inc.add_argument("--no-open", action="store_true")
 
     t = sub.add_parser("today", help="today's regime and trade plan")
     t.add_argument("--equity", type=float, default=500.0)
@@ -93,15 +99,46 @@ def main(argv=None) -> int:
             source = ("bundled sample (S&P 500 / 10 as SPY proxy, real VIX)" if args.sample else
                       "SPY, VIX, VIX9D, VIX3M daily history")
             print("Testing every rule combination (10-20 minutes on a typical laptop)...")
-            results, window = run_search(data_dir, split=args.split, start=start)
-            findings = analyze(results, window, args.account, data_dir, start)
-            print(console_text(findings))
+            if args.sample or args.split:
+                results, window = run_search(data_dir, split=args.split, start=start)
+            else:
+                from .search import cached_search
+
+                results, window = cached_search(data_dir, start, REPORT_DIR)
             os.makedirs(REPORT_DIR, exist_ok=True)
-            path = os.path.join(REPORT_DIR, f"search_{date.today():%Y%m%d}{'_sample' if args.sample else ''}.html")
+            suffix = f"{date.today():%Y%m%d}{'_sample' if args.sample else ''}"
+            if args.account > 0:
+                findings = analyze(results, window, args.account, data_dir, start)
+                print(console_text(findings))
+                page, path = html_page(findings, source, CALIBRATION_NOTE), os.path.join(REPORT_DIR, f"search_{suffix}.html")
+            else:
+                from . import growth_report
+
+                findings = growth_report.analyze_growth(results, window, data_dir, start)
+                print(growth_report.console_text(findings))
+                page = growth_report.html_page(findings, source, CALIBRATION_NOTE)
+                path = os.path.join(REPORT_DIR, f"growth_{suffix}.html")
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write(html_page(findings, source, CALIBRATION_NOTE))
+                fh.write(page)
             print(f"Report: {path}")
             print(SEARCH_DISCLOSURE)
+            if not args.no_open:
+                webbrowser.open("file://" + os.path.abspath(path))
+            return 0
+
+        if args.cmd == "income":
+            from . import income
+            from .search import cached_search
+
+            results, window = cached_search(DATA_DIR, args.start, REPORT_DIR)
+            findings = income.analyze_income(results, window, DATA_DIR, args.start)
+            bench = income.benchmarks_from_data(DATA_DIR, window[0], window[2])
+            print(income.console_text(findings, bench))
+            os.makedirs(REPORT_DIR, exist_ok=True)
+            path = os.path.join(REPORT_DIR, f"income_{date.today():%Y%m%d}.html")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(income.html_page(findings, bench, "SPY, VIX, VIX9D, VIX3M daily history"))
+            print(f"Report: {path}")
             if not args.no_open:
                 webbrowser.open("file://" + os.path.abspath(path))
             return 0

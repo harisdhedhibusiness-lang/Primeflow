@@ -116,22 +116,23 @@ def parse_csv(text: str) -> List[Row]:
     return rows
 
 
-def _yahoo(symbol: str, start: date) -> List[Row]:
+def _yahoo(symbol: str, start: date, adjusted: bool = False) -> List[Row]:
     p1 = int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp())
     p2 = int(time.time()) + 86400
     last_err: Exception = DataError("no Yahoo host answered")
     for host in ("query1", "query2"):
         url = (
             f"https://{host}.finance.yahoo.com/v8/finance/chart/{urllib.request.quote(symbol)}"
-            f"?period1={p1}&period2={p2}&interval=1d&events=history"
+            f"?period1={p1}&period2={p2}&interval=1d&events={'div' if adjusted else 'history'}"
         )
         try:
             payload = json.loads(_get(url))
             result = payload["chart"]["result"][0]
             quote = result["indicators"]["quote"][0]
+            closes = result["indicators"]["adjclose"][0]["adjclose"] if adjusted else quote["close"]
             rows: List[Row] = []
             for ts, o, h, l, c in zip(
-                result["timestamp"], quote["open"], quote["high"], quote["low"], quote["close"]
+                result["timestamp"], quote["open"], quote["high"], quote["low"], closes
             ):
                 if c is None:
                     continue
@@ -205,6 +206,9 @@ SOURCES: Dict[str, List[Tuple[str, Callable[[date], List[Row]]]]] = {
         ("Cboe", lambda s: _cboe("VIX9D", s)),
         ("Yahoo", lambda s: _yahoo("^VIX9D", s)),
     ],
+    # Benchmarks for the income planner.
+    "SPY_TR": [("Yahoo", lambda s: _yahoo("SPY", s, adjusted=True))],
+    "IRX": [("Yahoo", lambda s: _yahoo("^IRX", s))],
 }
 
 
@@ -227,7 +231,7 @@ def fetch_all(start: date, data_dir: str = DATA_DIR, log=print) -> None:
     os.makedirs(data_dir, exist_ok=True)
     fetch("SPY", start, data_dir, log)
     fetch("VIX", start, data_dir, log)
-    for optional in ("VIX3M", "VIX9D"):
+    for optional in ("VIX3M", "VIX9D", "SPY_TR", "IRX"):
         try:
             fetch(optional, start, data_dir, log)
         except DataError as exc:

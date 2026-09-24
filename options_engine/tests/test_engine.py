@@ -202,6 +202,39 @@ class Calibration(unittest.TestCase):
         self.assertAlmostEqual(MarketFrame(bars).term_vol(i, 7), 20.0 * 0.946 + (20.0 - 18.0) / 4.5 * 20.0 * 0.028, places=6)
 
 
+class Growth(unittest.TestCase):
+    def test_reg_t_margin(self):
+        from pfo.search import reg_t_margin
+
+        self.assertAlmostEqual(reg_t_margin(768, 700, False, 0.5), 0.5 + 0.2 * 768 - 68)
+        self.assertAlmostEqual(reg_t_margin(768, 500, False, 0.1), 0.1 + 50.0)  # 10% of strike floor
+        self.assertAlmostEqual(reg_t_margin(768, 840, True, 0.3), 0.3 + 0.2 * 768 - 72)
+
+    def test_all_in_growth(self):
+        from pfo.search import TradeRec, summarize
+
+        d = date(2020, 1, 1)
+        win = TradeRec(d, d, 10, 10.0, "expired", 100.0)
+        loss = TradeRec(d, d, 10, -100.0, "expired", 100.0)
+        s = summarize([win, win], years=1.0)
+        self.assertAlmostEqual(s["cagr"], 1.1 * 1.1 - 1)
+        self.assertTrue(summarize([win, loss], years=1.0)["ruined"])
+
+
+class Income(unittest.TestCase):
+    def test_sizing_respects_drawdown_cap(self):
+        from pfo.income import _curve, capital_needed, size_for_cap
+        from pfo.search import TradeRec
+
+        d = date(2020, 1, 1)
+        trades = [TradeRec(d, d, 1, 10.0, "x", 100.0)] * 9 + [TradeRec(d, d, 1, -50.0, "x", 100.0)]
+        f = size_for_cap(trades, 0.10)
+        self.assertLessEqual(_curve(trades, f)[1], 0.10 + 1e-9)
+        self.assertAlmostEqual(f, 0.2, places=3)  # a -50% trade at 20% of the account is a 10% drop
+        self.assertAlmostEqual(capital_needed(1000, 0.06), 200000)
+        self.assertEqual(capital_needed(1000, -0.01), float("inf"))
+
+
 class LiveChain(unittest.TestCase):
     PAYLOAD = {"timestamp": "2026-09-22 16:15:00", "data": {"current_price": 773.38, "options": [
         {"option": "SPY261030C00835000", "bid": 0.33, "ask": 0.34, "delta": 0.031, "iv": 0.2},
