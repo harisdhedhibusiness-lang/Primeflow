@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Optional, Tuple
 
-from .config import DipCallConfig, PutSpreadConfig
+from .config import CeilingCallConfig, DipCallConfig, DipFloorPutConfig, PutSpreadConfig
 from .pricing import OptionPricer, pick_expiry, years_to_expiry
 from .regime import MarketFrame
 
@@ -46,8 +46,8 @@ class Plan:
     max_hold_days: Optional[int] = None
 
 
-def spread_value(legs, S: float, T: float, vix: float, pricer: OptionPricer) -> float:
-    return sum(leg.qty * pricer.price(S, leg.strike, T, leg.is_call, vix) for leg in legs)
+def spread_value(legs, S: float, T: float, vol: float, pricer: OptionPricer) -> float:
+    return sum(leg.qty * pricer.price(S, leg.strike, T, leg.is_call, vol) for leg in legs)
 
 
 def spread_intrinsic(legs, S: float) -> float:
@@ -75,6 +75,10 @@ class Strategy:
         """Human-readable non-price exit rule, for the daily signal."""
         return ""
 
+    def live_plan(self, chain, today: date) -> Optional[dict]:
+        """The same trade picked from live quotes instead of the model. None if unsupported."""
+        return None
+
 
 class TrendPutSpread(Strategy):
     name = "put_spread"
@@ -94,8 +98,9 @@ class TrendPutSpread(Strategy):
 
     def build(self, mf: MarketFrame, i: int, pricer: OptionPricer) -> Optional[Plan]:
         c = self.cfg
-        today, S, vix = mf.dates[i], mf.close[i], mf.vix[i]
+        today, S = mf.dates[i], mf.close[i]
         expiry = pick_expiry(today, c.dte_target, c.dte_min, c.dte_max)
+        vix = mf.term_vol(i, (expiry - today).days) if expiry else None
         if expiry is None or vix is None:
             return None
         T = years_to_expiry(today, expiry)
@@ -143,8 +148,9 @@ class PullbackCallSpread(Strategy):
 
     def build(self, mf: MarketFrame, i: int, pricer: OptionPricer) -> Optional[Plan]:
         c = self.cfg
-        today, S, vix = mf.dates[i], mf.close[i], mf.vix[i]
+        today, S = mf.dates[i], mf.close[i]
         expiry = pick_expiry(today, c.dte_target, c.dte_min, c.dte_max)
+        vix = mf.term_vol(i, (expiry - today).days) if expiry else None
         if expiry is None or vix is None:
             return None
         T = years_to_expiry(today, expiry)
@@ -176,7 +182,80 @@ class PullbackCallSpread(Strategy):
         return f"close when SPY closes above its {self.cfg.exit_sma}-day average{level}"
 
 
-STRATEGIES = {s.name: s for s in (TrendPutSpread, PullbackCallSpread)}
+class _FarCreditSpread(Strategy):
+    """Sell a far out-of-the-money option, buy one further out, hold to expiry."""
+
+    is_call = False
+
+    def build(self, mf: MarketFrame, i: int, pricer: OptionPricer) -> Optional[Plan]:
+        c = self.cfg
+        today, S = mf.dates[i], mf.close[i]
+        expiry = pick_expiry(today, c.dte_target, c.dte_min, c.dte_max)
+        vol = mf.term_vol(i, (expiry - today).days) if expiry else None
+        if expiry is None or vol is None:
+            return None
+        T = years_to_expiry(today, expiry)
+        short_k = pricer.strike_for_delta(S, T, vol, c.short_delta, is_call=self.is_call)
+        far_k = short_k + c.width if self.is_call else short_k - c.width
+        legs = (Leg(short_k, self.is_call, -1), Leg(far_k, self.is_call, +1))
+        mid = spread_value(legs, S, T, vol, pricer)
+        if -mid < c.min_credit:
+            return None
+        # Hold to expiry: no profit target, and the "stop" is the spread's own maximum loss.
+        return Plan(self.name, legs, expiry, "credit", c.width, mid, 1.0, 1e9, 0)
+
+    def live_plan(self, chain, today: date) -> Optional[dict]:
+        c = self.cfg
+        expiry = chain.nearest_expiry(today, c.dte_target, c.dte_min, c.dte_max, self.is_call)
+        if expiry is None:
+            return None
+        short = chain.by_delta(expiry, self.is_call, c.short_delta)
+        if short is None:
+            return None
+        far = chain.get(expiry, self.is_call, short.strike + (c.width if self.is_call else -c.width))
+        if far is None:
+            return None
+        return {"expiry": expiry, "short": short, "long": far, "width": c.width,
+                "mid": short.mid - far.mid, "natural": short.bid - far.ask, "min_credit": c.min_credit}
+
+
+class CeilingCallSpread(_FarCreditSpread):
+    name = "ceiling_call"
+    title = "Ceiling Call Spread"
+    summary = (
+        "Every day it isn't already in a trade: sell the ~3-delta SPY call about 45 days out "
+        "(roughly 8-10% above the market) and buy the call $5 higher. Hold to expiry. It loses "
+        "only if SPY rallies through the sold strike by expiry."
+    )
+    is_call = True
+
+    def __init__(self, cfg: CeilingCallConfig = CeilingCallConfig()):
+        self.cfg = cfg
+
+    def entry_signal(self, mf: MarketFrame, i: int) -> bool:
+        return mf.regime[i] is not None
+
+
+class DipFloorPutSpread(_FarCreditSpread):
+    name = "dip_put"
+    title = "Dip Floor Put Spread"
+    summary = (
+        "When the daily bias is bullish and RSI(2) closes under 10 (a sharp dip in an uptrend): "
+        "sell the ~5-delta SPY put about 14 days out and buy the put $5 lower. Hold to expiry. "
+        "It loses only if SPY keeps falling through the sold strike by expiry."
+    )
+    is_call = False
+
+    def __init__(self, cfg: DipFloorPutConfig = DipFloorPutConfig()):
+        self.cfg = cfg
+
+    def entry_signal(self, mf: MarketFrame, i: int) -> bool:
+        r = mf.regime[i]
+        osc = mf.rsi(self.cfg.rsi_length)[i]
+        return r is not None and r.bias == "bull" and osc is not None and osc < self.cfg.rsi_entry
+
+
+STRATEGIES = {s.name: s for s in (TrendPutSpread, PullbackCallSpread, CeilingCallSpread, DipFloorPutSpread)}
 
 
 def make_strategy(name: str) -> Strategy:

@@ -11,8 +11,8 @@ from typing import List, Sequence, Tuple
 from .study import GATE, Run, Study, StrategyStudy
 
 DISCLOSURE = (
-    "Hypothetical, model-priced results. Option prices are simulated with Black-Scholes and a "
-    "VIX-derived volatility surface, not historical quotes, so real fills will differ. Past "
+    "Hypothetical, model-priced results. Option prices are simulated with Black-Scholes on a "
+    "volatility surface calibrated to Cboe data, not historical quotes, so real fills will differ. Past "
     "performance does not indicate future results. Trading options involves substantial risk of "
     "loss and is not suitable for every investor. Educational software, not investment advice."
 )

@@ -176,9 +176,59 @@ class Search(unittest.TestCase):
             for a, b in zip(trades, trades[1:]):
                 self.assertLessEqual(a.exit, b.entry)  # never overlapping
         for t in search.simulate(buy, lo, len(mf) - 1):
-            self.assertGreaterEqual(t.pnl, -t.premium * 100 - 1.3 - 1e-6)  # can't lose more than paid
+            self.assertGreaterEqual(t.pnl, -(t.cost + 1.3 + 1e-6))  # can't lose more than paid
         every = search.every_entry_day(sell, lo, len(mf) - 1)
         self.assertGreater(len(every), len(search.simulate(sell, lo, len(mf) - 1)))
+
+
+class Calibration(unittest.TestCase):
+    def test_put_spreads_never_negative(self):
+        pr = OptionPricer()
+        for days in (6, 14, 30, 60):
+            T = days / 365
+            for k in range(600, 770, 5):
+                self.assertGreater(pr.price(773, k, T, False, 14) - pr.price(773, k - 5, T, False, 14), -1e-9)
+
+    def test_term_vol_uses_the_right_index(self):
+        bars = synthetic(days=260)
+        for b in bars:
+            b.vix, b.vix9d, b.vix3m = 20.0, 15.0, 25.0
+        mf = MarketFrame(bars)
+        i = len(mf) - 1
+        self.assertEqual(mf.term_vol(i, 7), 15.0)
+        self.assertEqual(mf.term_vol(i, 120), 25.0)
+        self.assertTrue(15.0 < mf.term_vol(i, 20) < 20.0 < mf.term_vol(i, 60) < 25.0)
+        bars[-1].vix9d = None  # missing index: estimated from VIX
+        self.assertAlmostEqual(MarketFrame(bars).term_vol(i, 7), 20.0 * 0.946 + (20.0 - 18.0) / 4.5 * 20.0 * 0.028, places=6)
+
+
+class LiveChain(unittest.TestCase):
+    PAYLOAD = {"timestamp": "2026-09-22 16:15:00", "data": {"current_price": 773.38, "options": [
+        {"option": "SPY261030C00835000", "bid": 0.33, "ask": 0.34, "delta": 0.031, "iv": 0.2},
+        {"option": "SPY261030C00840000", "bid": 0.26, "ask": 0.27, "delta": 0.025, "iv": 0.21},
+        {"option": "SPY261030C00800000", "bid": 1.5, "ask": 1.6, "delta": 0.12, "iv": 0.15},
+    ]}}
+
+    def test_parse_and_pick(self):
+        from pfo.chain import parse
+        from pfo.strategies import CeilingCallSpread
+
+        chain = parse(self.PAYLOAD)
+        plan = CeilingCallSpread().live_plan(chain, date(2026, 9, 22))
+        self.assertEqual((plan["short"].strike, plan["long"].strike), (835.0, 840.0))
+        self.assertAlmostEqual(plan["mid"], 0.07)
+        self.assertAlmostEqual(plan["natural"], 0.06)
+
+    def test_today_prints_live_trade(self):
+        from pfo.chain import parse
+        from pfo.strategies import CeilingCallSpread
+        from pfo.today import todays_signal
+
+        mf = MarketFrame(synthetic(days=300))
+        mf.dates[-1] = date(2026, 9, 22)
+        text = todays_signal(mf, [CeilingCallSpread()], 500, chain_loader=lambda: parse(self.PAYLOAD))
+        self.assertIn("SELL 835 call", text)
+        self.assertIn("99% of a $500 account", text)
 
 
 class Integration(unittest.TestCase):

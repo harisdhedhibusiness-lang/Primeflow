@@ -4,6 +4,7 @@ Sources, tried in order until one works:
   SPY   Yahoo Finance chart API -> Stooq CSV -> Nasdaq API
   VIX   Cboe CSV -> FRED (VIXCLS) -> Yahoo
   VIX3M Cboe CSV -> FRED (VXVCLS) -> Yahoo           (optional, for term structure)
+  VIX9D Cboe CSV -> Yahoo                            (optional, short-dated option pricing)
 
 If every source fails you can save the files by hand. Any CSV with a Date column and a
 Close column works (a Yahoo "Download" export is fine). Put them at data/SPY.csv,
@@ -47,6 +48,7 @@ class Bar:
     close: float
     vix: Optional[float] = None
     vix3m: Optional[float] = None
+    vix9d: Optional[float] = None
 
 
 # ---------------------------------------------------------------- downloading
@@ -199,6 +201,10 @@ SOURCES: Dict[str, List[Tuple[str, Callable[[date], List[Row]]]]] = {
         ("FRED", lambda s: _fred("VXVCLS", s)),
         ("Yahoo", lambda s: _yahoo("^VIX3M", s)),
     ],
+    "VIX9D": [
+        ("Cboe", lambda s: _cboe("VIX9D", s)),
+        ("Yahoo", lambda s: _yahoo("^VIX9D", s)),
+    ],
 }
 
 
@@ -221,10 +227,11 @@ def fetch_all(start: date, data_dir: str = DATA_DIR, log=print) -> None:
     os.makedirs(data_dir, exist_ok=True)
     fetch("SPY", start, data_dir, log)
     fetch("VIX", start, data_dir, log)
-    try:
-        fetch("VIX3M", start, data_dir, log)
-    except DataError as exc:
-        log(f"  VIX3M  skipped (optional): {exc}")
+    for optional in ("VIX3M", "VIX9D"):
+        try:
+            fetch(optional, start, data_dir, log)
+        except DataError as exc:
+            log(f"  {optional:<6} skipped (optional): {exc}")
 
 
 def write_csv(path: str, rows: List[Row]) -> str:
@@ -245,10 +252,10 @@ def read_csv(path: str) -> List[Row]:
 
 
 def load_market(data_dir: str = DATA_DIR, max_fill_days: int = 5) -> List[Bar]:
-    """SPY bars joined with VIX (required) and VIX3M (optional) closes.
+    """SPY bars joined with VIX (required) and VIX3M / VIX9D (optional) closes.
 
-    Gaps in the VIX series of up to `max_fill_days` bars are forward-filled; longer
-    gaps leave the bar without a VIX value, and the engine will not trade on it.
+    Gaps in a volatility series of up to `max_fill_days` bars are forward-filled; longer
+    gaps leave the value empty. The engine will not trade a bar without VIX.
     """
     spy_path = os.path.join(data_dir, "SPY.csv")
     vix_path = os.path.join(data_dir, "VIX.csv")
@@ -256,28 +263,21 @@ def load_market(data_dir: str = DATA_DIR, max_fill_days: int = 5) -> List[Bar]:
         if not os.path.exists(p):
             raise DataError(f"missing {p}. Run:  python -m pfo fetch")
     spy = read_csv(spy_path)
-    vix = {r[0]: r[4] for r in read_csv(vix_path)}
-    vix3m_path = os.path.join(data_dir, "VIX3M.csv")
-    vix3m = {r[0]: r[4] for r in read_csv(vix3m_path)} if os.path.exists(vix3m_path) else {}
+    series = {"vix": {r[0]: r[4] for r in read_csv(vix_path)}}
+    for name in ("VIX3M", "VIX9D"):
+        path = os.path.join(data_dir, f"{name}.csv")
+        series[name.lower()] = {r[0]: r[4] for r in read_csv(path)} if os.path.exists(path) else {}
 
+    last = {k: None for k in series}
+    age = {k: max_fill_days + 1 for k in series}
     bars: List[Bar] = []
-    last_vix: Optional[float] = None
-    last_vix3m: Optional[float] = None
-    vix_age = vix3m_age = max_fill_days + 1
     for d, o, h, l, c in spy:
-        if d in vix:
-            last_vix, vix_age = vix[d], 0
-        else:
-            vix_age += 1
-        if d in vix3m:
-            last_vix3m, vix3m_age = vix3m[d], 0
-        else:
-            vix3m_age += 1
-        bars.append(
-            Bar(
-                d, o, h, l, c,
-                last_vix if vix_age <= max_fill_days else None,
-                last_vix3m if vix3m_age <= max_fill_days else None,
-            )
-        )
+        vals = {}
+        for k, table in series.items():
+            if d in table:
+                last[k], age[k] = table[d], 0
+            else:
+                age[k] += 1
+            vals[k] = last[k] if age[k] <= max_fill_days else None
+        bars.append(Bar(d, o, h, l, c, vals["vix"], vals["vix3m"], vals["vix9d"]))
     return bars

@@ -19,7 +19,7 @@ from . import __version__
 from .data import DATA_DIR, SAMPLE_DIR, DataError, fetch_all, load_market
 from .regime import MarketFrame
 from .report import DISCLOSURE, console_summary, html_report
-from .strategies import STRATEGIES, make_strategy
+from .strategies import make_strategy
 from .study import run_study
 from .today import todays_signal
 
@@ -41,18 +41,20 @@ def main(argv=None) -> int:
     b = sub.add_parser("backtest", help="run the study and write an HTML report")
     b.add_argument("--start", type=_date, default=date(2005, 1, 1))
     b.add_argument("--end", type=_date)
-    b.add_argument("--strategies", default=",".join(STRATEGIES))
+    b.add_argument("--strategies", default="put_spread,dip_call")
     b.add_argument("--sample", action="store_true", help="use the bundled offline sample data")
     b.add_argument("--no-open", action="store_true", help="don't open the report in a browser")
 
     sr = sub.add_parser("search", help="win-rate search over single-leg SPY calls and puts")
     sr.add_argument("--sample", action="store_true", help="use the bundled offline sample data")
+    sr.add_argument("--start", type=_date, default=date(2005, 1, 1))
+    sr.add_argument("--account", type=float, default=500.0, help="account size the trades must fit")
     sr.add_argument("--split", type=_date, help="first out-of-sample date (default: 60%% through)")
     sr.add_argument("--no-open", action="store_true")
 
     t = sub.add_parser("today", help="today's regime and trade plan")
-    t.add_argument("--equity", type=float, default=100.0)
-    t.add_argument("--strategies", default=",".join(STRATEGIES))
+    t.add_argument("--equity", type=float, default=500.0)
+    t.add_argument("--strategies", default="ceiling_call,dip_put")
     t.add_argument("--no-fetch", action="store_true", help="use cached data")
 
     args = p.parse_args(argv)
@@ -84,18 +86,20 @@ def main(argv=None) -> int:
 
         if args.cmd == "search":
             from .search import run_search
-            from .search_report import analyze, console_text, html_page, DISCLOSURE as SEARCH_DISCLOSURE
+            from .search_report import CALIBRATION_NOTE, DISCLOSURE as SEARCH_DISCLOSURE, analyze, console_text, html_page
 
             data_dir = SAMPLE_DIR if args.sample else DATA_DIR
-            source = "bundled sample (S&P 500 / 10 as SPY proxy, real VIX)" if args.sample else "SPY + VIX daily history"
-            print("Testing every rule combination (a minute or two)...")
-            results, window = run_search(data_dir, split=args.split)
-            findings = analyze(results, window)
+            start = None if args.sample else args.start
+            source = ("bundled sample (S&P 500 / 10 as SPY proxy, real VIX)" if args.sample else
+                      "SPY, VIX, VIX9D, VIX3M daily history")
+            print("Testing every rule combination (10-20 minutes on a typical laptop)...")
+            results, window = run_search(data_dir, split=args.split, start=start)
+            findings = analyze(results, window, args.account, data_dir, start)
             print(console_text(findings))
             os.makedirs(REPORT_DIR, exist_ok=True)
             path = os.path.join(REPORT_DIR, f"search_{date.today():%Y%m%d}{'_sample' if args.sample else ''}.html")
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write(html_page(findings, source))
+                fh.write(html_page(findings, source, CALIBRATION_NOTE))
             print(f"Report: {path}")
             print(SEARCH_DISCLOSURE)
             if not args.no_open:
@@ -107,7 +111,9 @@ def main(argv=None) -> int:
                 fetch_all(date(2003, 1, 1), log=lambda *_: None)
             mf = MarketFrame(load_market(DATA_DIR))
             names = [n.strip() for n in args.strategies.split(",") if n.strip()]
-            print(todays_signal(mf, [make_strategy(n) for n in names], args.equity))
+            from .chain import fetch_chain
+
+            print(todays_signal(mf, [make_strategy(n) for n in names], args.equity, chain_loader=fetch_chain))
             return 0
     except (DataError, KeyError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

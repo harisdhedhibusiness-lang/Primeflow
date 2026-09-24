@@ -117,8 +117,9 @@ def run_backtest(
     hi = len(mf) - 1 if end is None else max(i for i, d in enumerate(mf.dates) if d <= end)
 
     def mark(pos: Position, i: int) -> float:
+        days = max((pos.plan.expiry - mf.dates[i]).days, 1)
         T = years_to_expiry(mf.dates[i], pos.plan.expiry)
-        return spread_value(pos.legs, mf.close[i], T, mf.vix[i], pricer)
+        return spread_value(pos.legs, mf.close[i], T, mf.term_vol(i, days), pricer)
 
     def close(pos: Position, i: int, exit_price: float, reason: str, commission: float) -> None:
         nonlocal cash

@@ -24,14 +24,14 @@ class CostConfig:
 class PricingConfig:
     risk_free: float = 0.03
     dividend_yield: float = 0.013
-    # VIX prices the whole 30-day strip including the wings, so it sits above at-the-money
-    # implied vol. 0.90 x VIX is a common approximation for SPX/SPY ATM IV.
-    atm_iv_ratio: float = 0.90
-    # Put skew: IV rises by this fraction of ATM IV for each standard deviation of
-    # moneyness below the forward (and falls above it).
-    skew: float = 0.25
-    iv_floor_ratio: float = 0.55
-    iv_cap_ratio: float = 2.5
+    # Calibrated to 1,255 out-of-the-money SPY options from Cboe's delayed chain (close of
+    # 2026-09-22, 4-70 days to expiry). At-the-money IV was 0.80x the Cboe volatility index
+    # for the same tenor (VIX9D / VIX / VIX3M, interpolated) at every expiry tested.
+    atm_iv_ratio: float = 0.80
+    # The smile (IV relative to ATM, by standardised moneyness) is the median measured on the
+    # same chain; see pricing.SMILE. smile_scale stretches it for stress tests
+    # (1.2 = 20% steeper skew, 0.8 = 20% flatter).
+    smile_scale: float = 1.0
     strike_step: float = 1.0
 
 
@@ -108,6 +108,34 @@ class DipCallConfig:
     max_hold_days: int = 7
     exit_dte: int = 2
     max_debit_frac: float = 0.80  # skip if the debit is over 80% of the width
+
+
+@dataclass(frozen=True)
+class CeilingCallConfig:
+    """Ceiling Call Spread: sell a ~3-delta call about 45 days out, buy the call $5 higher,
+    hold to expiry. Found by the win-rate search (see README)."""
+
+    short_delta: float = 0.03
+    width: float = 5.0
+    dte_target: int = 45
+    dte_min: int = 31
+    dte_max: int = 61
+    min_credit: float = 0.05
+
+
+@dataclass(frozen=True)
+class DipFloorPutConfig:
+    """Dip Floor Put Spread: after a sharp dip in a bullish daily bias, sell a ~5-delta put
+    about 14 days out, buy the put $5 lower, hold to expiry. Found by the win-rate search."""
+
+    short_delta: float = 0.05
+    width: float = 5.0
+    dte_target: int = 14
+    dte_min: int = 9
+    dte_max: int = 21
+    rsi_length: int = 2
+    rsi_entry: float = 10.0
+    min_credit: float = 0.05
 
 
 # Standard SPY weekly expirations are only modelled from this date. Before it the
