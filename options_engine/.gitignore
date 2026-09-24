@@ -3,3 +3,4 @@ __pycache__/
 reports/
 data/*.csv
 !data/sample/*.csv
+*.raw
