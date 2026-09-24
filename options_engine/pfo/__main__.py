@@ -4,6 +4,7 @@
     python -m pfo backtest              run the full study, write an HTML report
     python -m pfo backtest --sample     same, on the bundled 2014-2018 sample (offline)
     python -m pfo today --equity 2000   today's regime and exact trade, for paper trading
+    python -m pfo search                win-rate search over single SPY calls and puts
 """
 
 from __future__ import annotations
@@ -44,6 +45,11 @@ def main(argv=None) -> int:
     b.add_argument("--sample", action="store_true", help="use the bundled offline sample data")
     b.add_argument("--no-open", action="store_true", help="don't open the report in a browser")
 
+    sr = sub.add_parser("search", help="win-rate search over single-leg SPY calls and puts")
+    sr.add_argument("--sample", action="store_true", help="use the bundled offline sample data")
+    sr.add_argument("--split", type=_date, help="first out-of-sample date (default: 60%% through)")
+    sr.add_argument("--no-open", action="store_true")
+
     t = sub.add_parser("today", help="today's regime and trade plan")
     t.add_argument("--equity", type=float, default=100.0)
     t.add_argument("--strategies", default=",".join(STRATEGIES))
@@ -72,6 +78,26 @@ def main(argv=None) -> int:
                 fh.write(html_report(study))
             print(f"Report: {path}")
             print(DISCLOSURE)
+            if not args.no_open:
+                webbrowser.open("file://" + os.path.abspath(path))
+            return 0
+
+        if args.cmd == "search":
+            from .search import run_search
+            from .search_report import analyze, console_text, html_page, DISCLOSURE as SEARCH_DISCLOSURE
+
+            data_dir = SAMPLE_DIR if args.sample else DATA_DIR
+            source = "bundled sample (S&P 500 / 10 as SPY proxy, real VIX)" if args.sample else "SPY + VIX daily history"
+            print("Testing every rule combination (a minute or two)...")
+            results, window = run_search(data_dir, split=args.split)
+            findings = analyze(results, window)
+            print(console_text(findings))
+            os.makedirs(REPORT_DIR, exist_ok=True)
+            path = os.path.join(REPORT_DIR, f"search_{date.today():%Y%m%d}{'_sample' if args.sample else ''}.html")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(html_page(findings, source))
+            print(f"Report: {path}")
+            print(SEARCH_DISCLOSURE)
             if not args.no_open:
                 webbrowser.open("file://" + os.path.abspath(path))
             return 0

@@ -90,6 +90,7 @@ python -m pfo fetch                  # download SPY / VIX / VIX3M history
 python -m pfo backtest               # full study, 2005 to today; writes reports/backtest_YYYYMMDD.html
 python -m pfo backtest --sample      # offline: the bundled 2014-2018 data
 python -m pfo today --equity 2000    # today's regime and the exact trade to paper-trade
+python -m pfo search                 # win-rate search: 12,960 single SPY call/put rules
 python -m unittest discover -s tests # self-tests
 ```
 
@@ -128,6 +129,31 @@ Each strategy gets:
   period on its own.
 - **A luck check.** The trades are reshuffled 5,000 times to show the range of outcomes.
 - **Every trade, and every risk-manager intervention.**
+
+## Win-rate search (single SPY calls and puts)
+
+`python -m pfo search` tests 12,960 rules for buying or selling one SPY call or put. Each rule
+combines an entry signal, days to expiry, delta, profit target, stop and holding period. The
+search then:
+
+- ranks every rule that made at least 30 trades by win rate
+- re-tests each 99% rule by entering on **every** day its signal fired, because one path of
+  non-overlapping trades can miss the bad days by timing luck
+- checks whether rules at 99% in the first 60% of the data stayed at 99% afterwards
+- gives a 95% lower bound on each rule's true win rate. Proving 99% takes about 299 straight
+  wins with no losses.
+
+On the bundled 2014–2018 data:
+
+- **Buying:** 0 of 6,230 rules that buy a call or put reached 99%. The best, at about 96%,
+  lost about 20 wins' worth on each loss.
+- **Selling:** every 99% rule sold a far out-of-the-money option.
+- **Later data:** of the 60 rules at 99% before 2017, 10 stayed there afterwards.
+- **Proof:** the best one sold a ~5-delta put about 45 days out in a bullish daily bias. Even
+  so, it has only 38 independent trades, which is not enough to prove 99%.
+
+That period contains no crash on the scale of 2008, 2020 or 2025. Run the full history before
+trusting any of it.
 
 ## What the backtest can and cannot tell you
 

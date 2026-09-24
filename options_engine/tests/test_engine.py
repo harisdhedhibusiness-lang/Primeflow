@@ -152,6 +152,35 @@ class Data(unittest.TestCase):
             self.assertEqual(load_market(tmp, max_fill_days=1)[-1].vix, None)
 
 
+class Search(unittest.TestCase):
+    def test_lower_bound(self):
+        from pfo.search_report import PROOF_TRADES, win_rate_lower_bound
+
+        self.assertAlmostEqual(win_rate_lower_bound(30, 30), 0.05 ** (1 / 30))
+        self.assertLess(win_rate_lower_bound(95, 100), 0.95)
+        self.assertGreater(win_rate_lower_bound(95, 100), 0.88)
+        self.assertEqual(PROOF_TRADES, 299)
+
+    def test_single_leg_rules(self):
+        from pfo import search
+        from pfo.config import PricingConfig
+
+        search._init(SAMPLE_DIR, PricingConfig(), CostConfig())
+        mf = search._S["mf"]
+        lo = next(i for i, r in enumerate(mf.regime) if r is not None)
+        buy = search.Rule("buy", "call", "bull_trend", 30, 0.5, 0.25, 0.5, 10)
+        sell = search.Rule("sell", "put", "bull_trend", 30, 0.10, 1.0, None, 999)
+        for rule in (buy, sell):
+            trades = search.simulate(rule, lo, len(mf) - 1)
+            self.assertGreater(len(trades), 10)
+            for a, b in zip(trades, trades[1:]):
+                self.assertLessEqual(a.exit, b.entry)  # never overlapping
+        for t in search.simulate(buy, lo, len(mf) - 1):
+            self.assertGreaterEqual(t.pnl, -t.premium * 100 - 1.3 - 1e-6)  # can't lose more than paid
+        every = search.every_entry_day(sell, lo, len(mf) - 1)
+        self.assertGreater(len(every), len(search.simulate(sell, lo, len(mf) - 1)))
+
+
 class Integration(unittest.TestCase):
     def test_sample_study(self):
         mf = MarketFrame(load_market(SAMPLE_DIR))
