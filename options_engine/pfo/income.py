@@ -1,10 +1,13 @@
 """Side-income planner: how much capital each strategy needs to pay a monthly target safely.
 
-"Safe" here means sized so the worst drop in 2005-2026 stays under a cap (10% or 20%). Each
-rule's trades are replayed with a fixed fraction of the account committed per trade; the rest
-sits in cash earning nothing (conservative: T-bills would add to every row). The fraction is
-the largest one that keeps the historical worst drop under the cap. Growth at that fraction
-sets the capital needed for the income target.
+"Safe" means sized so the worst drop in 2005-2026 stays under a cap (10% or 20%) no matter
+when you started or which day you entered. Each rule is replayed with a fixed fraction of the
+account committed per trade; the rest sits in cash earning nothing (conservative: T-bills
+would add to every row). The fraction is the smallest of:
+  * the largest fraction that keeps the worst drop under the cap on each of 60 different
+    starting days (so one lucky sequence of entry dates can't set the size), and
+  * cap / worst single-trade loss from ANY day the signal fired (so the one bad entry the
+    backtest path happened to skip is still survivable).
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from typing import Dict, List, Sequence, Tuple
 
 from .config import CostConfig, PricingConfig
 from .report import _CSS
-from .search import MIN_TRADES, TradeRec, _S, _init, _years, simulate
+from .search import MIN_TRADES, TradeRec, _S, _init, _years, every_entry_day, simulate
 from .search_report import STRESS
 
 DD_CAPS = (0.10, 0.20)
@@ -69,12 +72,34 @@ def plan(trades: Sequence[TradeRec], years: float, cap: float) -> Dict[str, floa
             "years_counted": len(by_year)}
 
 
+def robust_plan(rule, lo: int, hi: int, years: float, cap: float, phases: int = 60,
+                ed_trades: Sequence[TradeRec] = ()) -> Dict[str, float]:
+    """plan() made robust to entry timing (see module docstring)."""
+    paths = [simulate(rule, s, hi) for s in range(lo, min(lo + phases, hi))]
+    paths = [p for p in paths if p]
+    if not paths:
+        return {"fraction": 0.0, "cagr": 0.0, "cagr_min": 0.0, "dd": 0.0, "worst_year": 0.0,
+                "losing_years": 0, "years_counted": 0, "worst_trade": 0.0}
+    worst_trade = min((t.pnl / t.capital for t in ed_trades if t.capital > 0), default=0.0)
+    f = min(size_for_cap(p, cap) for p in paths)
+    if worst_trade < 0:
+        f = min(f, cap / -worst_trade)
+    outs = [_curve(p, f) for p in paths]
+    cagrs = sorted((o[0] ** (1 / years) - 1) if o[0] > 0 else -1.0 for o in outs)
+    base = _curve(paths[0], f)
+    by_year = base[2]
+    return {"fraction": f, "cagr": cagrs[len(cagrs) // 2], "cagr_min": cagrs[0], "dd": max(o[1] for o in outs),
+            "worst_year": min(by_year.values()) if by_year else 0.0,
+            "losing_years": sum(1 for r in by_year.values() if r < 0), "years_counted": len(by_year),
+            "worst_trade": worst_trade}
+
+
 def capital_needed(monthly: float, cagr: float) -> float:
     return math.inf if cagr <= 0 else monthly * 12 / cagr
 
 
-def analyze_income(results, window, data_dir: str, start=None, shortlist: int = 250, stress_top: int = 5,
-                   log=print) -> Dict[str, object]:
+def analyze_income(results, window, data_dir: str, start=None, shortlist: int = 250, robust_top: int = 60,
+                   stress_top: int = 5, log=print) -> Dict[str, object]:
     mf = _S["mf"]
     lo, hi = _S["lo"], len(mf) - 1
     years = _years(mf.dates[lo], mf.dates[hi])
@@ -85,12 +110,19 @@ def analyze_income(results, window, data_dir: str, start=None, shortlist: int = 
     pool.sort(key=lambda r: -(r[1]["cagr"] / max(r[1]["growth_dd"], 0.01)))
     log(f"  {len(pool):,} rules profitable in both halves; sizing the best {min(shortlist, len(pool))} for safety...")
 
-    rows = []
+    quick = []
     for rule, full, ins, oos in pool[:shortlist]:
         trades = simulate(rule, lo, hi)
-        entry = {"rule": rule, "full": full, "ins": ins, "oos": oos, "win_rate": full["win_rate"]}
+        quick.append((max(plan(trades, years, cap)["cagr"] for cap in DD_CAPS), rule, full, ins, oos))
+    quick.sort(key=lambda q: -q[0])
+    log(f"  re-sizing the best {min(robust_top, len(quick))} against every entry day and 60 start dates...")
+    rows = []
+    for _, rule, full, ins, oos in quick[:robust_top]:
+        ed = every_entry_day(rule, lo, hi)
+        entry = {"rule": rule, "full": full, "ins": ins, "oos": oos, "win_rate": full["win_rate"],
+                 "ed_win_rate": (sum(t.pnl > 0 for t in ed) / len(ed)) if ed else 0.0}
         for cap in DD_CAPS:
-            entry[cap] = plan(trades, years, cap)
+            entry[cap] = robust_plan(rule, lo, hi, years, cap, ed_trades=ed)
         rows.append(entry)
     rows.sort(key=lambda e: -e[DD_CAPS[0]]["cagr"])
 
@@ -117,7 +149,11 @@ def analyze_income(results, window, data_dir: str, start=None, shortlist: int = 
     for e in top:
         e["worst_stress_cagr"] = min(c for _, c, _ in e["stress"])
         e["worst_stress_dd"] = max(d for _, _, d in e["stress"])
-    return {"window": window, "years": years, "pool": len(pool), "rows": rows, "top": top}
+    # Recommend a defined-risk rule that stayed profitable, with a contained drop, in every stress test.
+    safe = [e for e in top if e["rule"].action == "spread" and e["worst_stress_cagr"] > 0
+            and e["worst_stress_dd"] <= 1.5 * DD_CAPS[0]]
+    return {"window": window, "years": years, "pool": len(pool), "rows": rows, "top": top,
+            "recommended": safe[0] if safe else None}
 
 
 def benchmarks_from_data(data_dir: str, start, end) -> List[dict]:
@@ -168,8 +204,9 @@ def console_text(a: Dict[str, object], bench: List[dict]) -> str:
         out += ["", f"Best options rules sized so the worst drop since 2005 stays under {cap:.0%}:"]
         for e in sorted(a["rows"], key=lambda e: -e[cap]["cagr"])[:5]:
             p = e[cap]
-            out.append(f"  {p['cagr']:+.1%}/yr (drop {p['dd']:.0%}, worst year {p['worst_year']:+.1%}, win rate "
-                       f"{e['win_rate']:.0%}) needs {_money(capital_needed(1000, p['cagr']))} for $1k/mo | "
+            out.append(f"  {p['cagr']:+.1%}/yr (worst start {p['cagr_min']:+.1%}, drop {p['dd']:.0%}, {p['fraction']:.0%} of "
+                       f"account per trade, worst trade {p['worst_trade']:.0%} of its capital, every-day win "
+                       f"{e['ed_win_rate']:.1%}) needs {_money(capital_needed(1000, p['cagr']))} for $1k/mo | "
                        f"{e['rule'].describe()}")
     return "\n".join(out)
 
@@ -186,14 +223,15 @@ def html_page(a: Dict[str, object], bench: List[dict], source: str) -> str:
     cap_tables = []
     for cap in DD_CAPS:
         rows = "".join(
-            f"<tr><td class='rule'>{html.escape(e['rule'].describe())}</td><td>{e['win_rate']:.1%}</td>"
-            f"<td>{e[cap]['fraction']:.0%}</td><td>{e[cap]['cagr']:+.1%}</td><td>{e[cap]['dd']:.0%}</td>"
+            f"<tr><td class='rule'>{html.escape(e['rule'].describe())}</td><td>{e['win_rate']:.1%} / {e['ed_win_rate']:.1%}</td>"
+            f"<td>{e[cap]['fraction']:.0%}</td><td>{e[cap]['cagr']:+.1%} ({e[cap]['cagr_min']:+.1%})</td><td>{e[cap]['dd']:.0%}</td>"
             f"<td>{e[cap]['worst_year']:+.1%}</td><td>{e[cap]['losing_years']} of {e[cap]['years_counted']}</td>"
             f"<td>{_money(capital_needed(1000, e[cap]['cagr']))}</td><td>{_money(capital_needed(2000, e[cap]['cagr']))}</td></tr>"
             for e in sorted(a["rows"], key=lambda e: -e[cap]["cagr"])[:10])
         cap_tables.append(f"""
 <h3>Worst drop kept under {cap:.0%}</h3>
-<div class="scroll"><table><thead><tr><th>Rule</th><th>Win rate</th><th>Account per trade</th><th>Per year</th>
+<div class="scroll"><table><thead><tr><th>Rule</th><th>Win rate (path / every entry day)</th><th>Account per trade</th>
+<th>Per year (worst start date)</th>
 <th>Worst drop</th><th>Worst year</th><th>Losing years</th><th>Capital for $1,000/mo</th><th>Capital for $2,000/mo</th>
 </tr></thead><tbody>{rows}</tbody></table></div>""")
 
@@ -205,13 +243,21 @@ def html_page(a: Dict[str, object], bench: List[dict], source: str) -> str:
                       f"<th>Per year at the 10%-drop size</th><th>Worst drop</th></tr></thead><tbody>{rows}</tbody></table></div>")
 
     best = max(a["rows"], key=lambda e: e[DD_CAPS[0]]["cagr"]) if a["rows"] else None
+    rec = a.get("recommended")
     lead = ""
-    if best:
+    if rec:
+        p = rec[DD_CAPS[0]]
+        lead += (f"<p><b>Recommended (defined risk, profitable in every stress test):</b> "
+                 f"{html.escape(rec['rule'].describe())}. Sized for a 10% worst drop it made {p['cagr']:+.1%} per year "
+                 f"with {p['losing_years']} losing years of {p['years_counted']}; its worst stress test still made "
+                 f"{rec['worst_stress_cagr']:+.1%}. $1,000 a month takes about {_money(capital_needed(1000, p['cagr']))}; "
+                 f"$2,000 about {_money(capital_needed(2000, p['cagr']))}.</p>")
+    if best and best is not rec:
         p = best[DD_CAPS[0]]
-        lead = (f"<p><b>Best options rule with the worst drop under 10%:</b> {p['cagr']:+.1%} per year "
-                f"({html.escape(best['rule'].describe())}). $1,000 a month from it takes about "
-                f"{_money(capital_needed(1000, p['cagr']))}; $2,000 takes about {_money(capital_needed(2000, p['cagr']))}. "
-                f"Its worst calendar year was {p['worst_year']:+.1%}.</p>")
+        kind = {"sell": "sells options outright (open-ended risk, uncovered-option approval)",
+                "buy": "buys options", "spread": "is a spread"}[best["rule"].action]
+        lead += (f"<p><b>Highest return at the 10% size:</b> {p['cagr']:+.1%} per year, but it {kind} "
+                 f"({html.escape(best['rule'].describe())}).</p>")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -231,7 +277,8 @@ software, not investment advice.</aside>
 21 years of SPY data turns a small account into $1,000-$2,000 a month safely.</p>
 {lead}
 <p><b>How "safe" is measured:</b> each strategy is sized so its worst drop from 2005 to 2026 (2008, 2020 and 2022
-included) stays under the cap. Unused cash is assumed to earn nothing; T-bills would add a few percent to every row.</p>
+included) stays under the cap from 60 different start dates, and so its single worst trade from any possible entry day
+costs no more than the cap. Unused cash is assumed to earn nothing; T-bills would add to every row.</p>
 </div>
 <section><h2>Benchmarks</h2>
 <div class="scroll"><table><thead><tr><th>Strategy</th><th>Per year</th><th>Worst drop</th><th>Capital for $1,000/mo</th>

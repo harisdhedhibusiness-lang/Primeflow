@@ -60,7 +60,7 @@ def main(argv=None) -> int:
 
     t = sub.add_parser("today", help="today's regime and trade plan")
     t.add_argument("--equity", type=float, default=500.0)
-    t.add_argument("--strategies", default="ceiling_call,dip_put")
+    t.add_argument("--strategies", default="income_call,ceiling_call")
     t.add_argument("--no-fetch", action="store_true", help="use cached data")
 
     args = p.parse_args(argv)

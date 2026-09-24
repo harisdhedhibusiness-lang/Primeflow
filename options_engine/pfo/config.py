@@ -121,6 +121,7 @@ class CeilingCallConfig:
     dte_min: int = 31
     dte_max: int = 61
     min_credit: float = 0.05
+    stop_multiple: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,25 @@ class DipFloorPutConfig:
     rsi_length: int = 2
     rsi_entry: float = 10.0
     min_credit: float = 0.05
+    stop_multiple: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class IncomeCallConfig:
+    """Income Call Spread: sell a ~3-delta call about 14 days out, buy the call $20 higher,
+    close if the loss reaches 2x the credit, otherwise hold to expiry. The best rule from the
+    income planner once sized for a 10% worst drop (see README)."""
+
+    short_delta: float = 0.03
+    width: float = 20.0
+    dte_target: int = 14
+    dte_min: int = 9
+    dte_max: int = 21
+    min_credit: float = 0.05
+    stop_multiple: float = 2.0  # close when the loss reaches this multiple of the credit
+    # Share of the account committed as spread collateral per trade: the largest size that kept
+    # the worst 2005-2026 drop under 10% from every start date and every possible entry day.
+    account_fraction: float = 0.61
 
 
 # Standard SPY weekly expirations are only modelled from this date. Before it the

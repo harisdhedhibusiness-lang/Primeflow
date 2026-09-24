@@ -9,6 +9,47 @@ nothing to install, no paid data, no GitHub Actions.
 > is not suitable for every investor. Past performance does not indicate future results.
 > Educational software, not investment advice.
 
+## Side income: $1,000–$2,000 a month
+
+**The rule that decides everything:** monthly income = capital × yearly return ÷ 12. No
+strategy in 21 years of SPY data turns a small account into $1,000–$2,000 a month safely.
+
+`python -m pfo income` checks the 37,800 search rules. It keeps the 5,922 that made money over
+2005–2026 *and* in both halves of that period. Each one is sized so its worst drop stays under
+10%, whatever day you started (60 start dates tested). Its single worst trade, from **any**
+possible entry day, must also stay under 10%. Unused cash earns nothing in these numbers;
+T-bills would add to every row.
+
+| Strategy | Per year | Worst drop | Capital for $1,000/mo | Capital for $2,000/mo |
+|---|---|---|---|---|
+| T-bills at today's rate (4.03%) | +4.0% | 0% | $297,915 | $595,829 |
+| SPY buy and hold, dividends reinvested | +10.9% | 55% | $109,970 | $219,940 |
+| SPY, only 18% invested so the worst drop is 10% | +1.9% | 10% | $633,480 | $1,266,959 |
+| **Income Call Spread, 61% of account (10% worst-drop size)** | **+6.4%** | **6%** | **$187,000** | **$374,000** |
+| Income Call Spread, 100% of account | +10.7% | 10% | $112,000 | $224,000 |
+
+**Income Call Spread.** Sell the ~3-delta SPY call about 14 days out and buy the call $20
+higher. Close it if the loss reaches 2× the credit; otherwise hold to expiry. Put on a new one
+whenever the last one is closed.
+
+| | Result, 2005–2026 |
+|---|---|
+| Trades | 511, 93.5% winners |
+| Both halves of the period (all-in) | +10.4% and +11.3% a year |
+| At the 61% size | 0 losing years of 22; worst month −5.5%; typical month +0.7% |
+| At full size | 1 losing year of 22; worst month −9.0%; typical month +1.1% |
+| Worst stress test (fees, fills, volatility ±6%, skew ±20%) | still +4.3% a year at the 61% size |
+| Real Cboe quotes, 14 days out | model credit $0.15 vs real $0.13, so expect a little less |
+
+It's a defined-risk spread, so it needs a margin account with spread approval but not
+uncovered-option approval. `python -m pfo today --equity 150000` prints today's exact order,
+the stop price and the number of spreads for that account size.
+
+The next-best rule sells SPY calls outright, with no spread. It made +9.9% a year at the safe
+size, but it needs uncovered-option approval, its risk is open-ended, and it earned less in
+recent years (+7% since 2018 vs +12% before). The rule that looked best before timing-robust
+sizing (a put sold after dips, 100% winners) fell 78% in one stress test and was dropped.
+
 ## The 99% question, for a $500 account
 
 **The test.** `python -m pfo search --account 500` ran 24,360 SPY call and put rules over
@@ -105,7 +146,8 @@ Black-Scholes on a volatility surface built from Cboe's indexes:
   0.5 points of the real ones, and $5 put spreads price at 1.04–1.08x the real mid.
 - *Early years.* Before VIX9D (2011) and VIX3M (2009) existed, they're estimated from VIX.
 
-**Strategies.** All four are spreads, so the maximum loss is known before entry:
+**Strategies.** All five are spreads, so the maximum loss is known before entry:
+- *Income Call Spread:* the best rule from the income planner (see above).
 - *Ceiling Call Spread* and *Dip Floor Put Spread:* the two finalists from the $500 search
   (see above). The Dip Floor Put sells the ~5-delta put 14 days out after a sharp dip in a
   bullish bias. It won 114 of 114 trades. But under the "skew 20% flatter"
@@ -141,8 +183,10 @@ Or from a terminal, inside this folder:
 
 ```
 python -m pfo fetch                        # download SPY / VIX / VIX9D / VIX3M history
-python -m pfo today --equity 500           # today's regime and exact trades, from live Cboe quotes
-python -m pfo search --account 500         # the 24,360-rule win-rate search (10-20 minutes)
+python -m pfo today --equity 150000        # today's exact trades, stop and size, from live Cboe quotes
+python -m pfo income                       # capital needed for $1k-$2k a month, sized for safety
+python -m pfo search --account 500         # win-rate search for a $500 account (10-30 minutes)
+python -m pfo search --account 0           # win rate vs growth, no account limit
 python -m pfo backtest                     # the original study, 2005 to today
 python -m pfo backtest --sample            # offline: the bundled 2014-2018 data
 python -m unittest discover -s tests       # self-tests
@@ -220,7 +264,7 @@ pfo/
   indicators.py     SMA / EMA / RSI
   pricing.py        Black-Scholes, calibrated vol surface, strike and expiry selection
   regime.py         the PrimeFlow Regime Gate and the VIX9D/VIX/VIX3M term structure
-  strategies.py     the four strategies
+  strategies.py     the five strategies
   chain.py          live SPY quotes from Cboe's delayed chain
   risk.py           position sizing and circuit breakers
   backtest.py       the daily event loop
@@ -228,6 +272,8 @@ pfo/
   study.py          the backtest study and its go/no-go gate
   search.py         the win-rate search, every-day retest and account paths
   search_report.py  search findings, stress tests and the HTML report
+  income.py         capital needed for a monthly income target, sized for a worst-drop cap
+  growth_report.py  win rate versus growth
   report.py         backtest console table and HTML report
   today.py          today's signal
   config.py         every tunable number

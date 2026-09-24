@@ -262,6 +262,7 @@ class LiveChain(unittest.TestCase):
         text = todays_signal(mf, [CeilingCallSpread()], 500, chain_loader=lambda: parse(self.PAYLOAD))
         self.assertIn("SELL 835 call", text)
         self.assertIn("99% of a $500 account", text)
+        self.assertIn("one spread limit order", text)
 
 
 class Integration(unittest.TestCase):

@@ -111,13 +111,24 @@ def _live_lines(live: dict, chain, today, equity: float, costs: CostConfig) -> L
     if live["mid"] < live["min_credit"]:
         out += [f"  SKIP: credit below the ${live['min_credit']:.2f} minimum the backtest required.", ""]
         return out
+    stop = live.get("stop_multiple")
+    out.append(f"  Place it as one spread limit order at a ${live['mid']:.2f} credit per spread. Do not accept less than ${live['min_credit']:.2f}.")
+    if stop:
+        out.append(f"  STOP: if the spread's price reaches ${live['mid'] * (1 + stop):.2f} (a loss of {stop:g}x the credit), "
+                   f"buy it back. Otherwise hold to expiry.")
+    else:
+        out.append("  Then do nothing until expiry.")
     out += [
-        f"  Place ONE spread limit order for a ${live['mid']:.2f} credit. Do not accept less than ${live['min_credit']:.2f}.",
-        f"  Then do nothing until expiry. It expires worthless (full win) unless SPY {breach} {short.strike:g} on {expiry}.",
-        f"  Max loss per spread: ${capital:,.0f}.",
+        f"  It expires worthless (full win) unless SPY {breach} {short.strike:g} on {expiry}.",
+        f"  Max loss per spread: ${capital:,.0f}{' (the stop normally caps it far lower)' if stop else ''}.",
     ]
+    fraction = live.get("account_fraction")
     if capital > equity:
         out.append(f"  ACCOUNT CHECK: BLOCKED. One spread needs ${capital:,.0f}; the account has ${equity:,.0f}.")
+    elif fraction:
+        n = int(equity * fraction // capital)
+        out.append(f"  SIZE: {n} spread(s), about {fraction:.0%} of a ${equity:,.0f} account as collateral "
+                   f"(${n * capital:,.0f}). That size kept the worst 2005-2026 drop under 10%.")
     else:
         out.append(f"  ACCOUNT CHECK: one spread ties up ${capital:,.0f} = {capital / equity:.0%} of a "
                    f"${equity:,.0f} account. A loss costs about that much.")

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Optional, Tuple
 
-from .config import CeilingCallConfig, DipCallConfig, DipFloorPutConfig, PutSpreadConfig
+from .config import CeilingCallConfig, DipCallConfig, DipFloorPutConfig, IncomeCallConfig, PutSpreadConfig
 from .pricing import OptionPricer, pick_expiry, years_to_expiry
 from .regime import MarketFrame
 
@@ -201,8 +201,8 @@ class _FarCreditSpread(Strategy):
         mid = spread_value(legs, S, T, vol, pricer)
         if -mid < c.min_credit:
             return None
-        # Hold to expiry: no profit target, and the "stop" is the spread's own maximum loss.
-        return Plan(self.name, legs, expiry, "credit", c.width, mid, 1.0, 1e9, 0)
+        # Hold to expiry: no profit target; without a stop, the spread's own maximum loss is the stop.
+        return Plan(self.name, legs, expiry, "credit", c.width, mid, 1.0, c.stop_multiple or 1e9, 0)
 
     def live_plan(self, chain, today: date) -> Optional[dict]:
         c = self.cfg
@@ -216,7 +216,8 @@ class _FarCreditSpread(Strategy):
         if far is None:
             return None
         return {"expiry": expiry, "short": short, "long": far, "width": c.width,
-                "mid": short.mid - far.mid, "natural": short.bid - far.ask, "min_credit": c.min_credit}
+                "mid": short.mid - far.mid, "natural": short.bid - far.ask, "min_credit": c.min_credit,
+                "stop_multiple": c.stop_multiple, "account_fraction": getattr(c, "account_fraction", None)}
 
 
 class CeilingCallSpread(_FarCreditSpread):
@@ -255,7 +256,25 @@ class DipFloorPutSpread(_FarCreditSpread):
         return r is not None and r.bias == "bull" and osc is not None and osc < self.cfg.rsi_entry
 
 
-STRATEGIES = {s.name: s for s in (TrendPutSpread, PullbackCallSpread, CeilingCallSpread, DipFloorPutSpread)}
+class IncomeCallSpread(_FarCreditSpread):
+    name = "income_call"
+    title = "Income Call Spread"
+    summary = (
+        "Every day it isn't already in a trade: sell the ~3-delta SPY call about 14 days out and "
+        "buy the call $20 higher. Close it if the loss reaches 2x the credit; otherwise hold to "
+        "expiry. Sized so its worst historical drop stayed under 10%."
+    )
+    is_call = True
+
+    def __init__(self, cfg: IncomeCallConfig = IncomeCallConfig()):
+        self.cfg = cfg
+
+    def entry_signal(self, mf: MarketFrame, i: int) -> bool:
+        return mf.regime[i] is not None
+
+
+STRATEGIES = {s.name: s for s in (TrendPutSpread, PullbackCallSpread, CeilingCallSpread, DipFloorPutSpread,
+                                  IncomeCallSpread)}
 
 
 def make_strategy(name: str) -> Strategy:
